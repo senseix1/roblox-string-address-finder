@@ -1,0 +1,112 @@
+#include <iostream>
+#include <Windows.h>
+#include <TlHelp32.h>
+#include <string>
+#include <vector>
+
+// Function to get the module base address
+uintptr_t GetModuleBaseAddress(DWORD procId, const wchar_t* moduleName) {
+    uintptr_t moduleBase = 0;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, procId);
+    if (hSnapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W moduleEntry32;
+        moduleEntry32.dwSize = sizeof(moduleEntry32);
+        if (Module32FirstW(hSnapshot, &moduleEntry32)) {
+            do {
+                if (wcscmp(moduleEntry32.szModule, moduleName) == 0) {
+                    moduleBase = (uintptr_t)moduleEntry32.modBaseAddr;
+                    break;
+                }
+            } while (Module32NextW(hSnapshot, &moduleEntry32));
+        }
+        CloseHandle(hSnapshot);
+    }
+    return moduleBase;
+}
+
+// Function to dump memory
+void DumpMemory(HANDLE hProcess, uintptr_t address, size_t size) {
+    BYTE* buffer = new BYTE[size];
+    SIZE_T bytesRead;
+    if (ReadProcessMemory(hProcess, (LPVOID)address, buffer, size, &bytesRead)) {
+        std::cout << "Dumped memory at address " << std::hex << address << " (" << std::dec << size << " bytes):" << std::endl;
+        for (size_t i = 0; i < size; i++) {
+            std::cout << std::hex << (int)buffer[i] << " ";
+        }
+        std::cout << std::endl;
+    }
+    else {
+        std::cerr << "Failed to read process memory." << std::endl;
+    }
+    delete[] buffer;
+}
+
+// Function to find strings in memory
+std::vector<uintptr_t> FindStrings(HANDLE hProcess) {
+    std::vector<uintptr_t> stringAddresses;
+    MEMORY_BASIC_INFORMATION memInfo;
+    uintptr_t address = 0;
+
+    while (VirtualQueryEx(hProcess, (LPCVOID)address, &memInfo, sizeof(memInfo))) {
+        if (memInfo.State == MEM_COMMIT && memInfo.Type == MEM_PRIVATE) {
+            BYTE* buffer = new BYTE[memInfo.RegionSize];
+            SIZE_T bytesRead;
+            if (ReadProcessMemory(hProcess, memInfo.BaseAddress, buffer, memInfo.RegionSize, &bytesRead)) {
+                for (size_t i = 0; i < bytesRead - 1; i++) {
+                    if (isprint(buffer[i]) && isprint(buffer[i + 1])) { // Check if printable characters
+                        std::string str(reinterpret_cast<const char*>(&buffer[i]), 2);
+                        std::cout << "Found string \"" << str << "\" at address: 0x" << std::hex << (uintptr_t)memInfo.BaseAddress + i << std::endl;
+                        stringAddresses.push_back((uintptr_t)memInfo.BaseAddress + i);
+                    }
+                }
+            }
+            delete[] buffer;
+        }
+        address += memInfo.RegionSize;
+    }
+
+    return stringAddresses;
+}
+
+int main() {
+    HWND hwnd = FindWindowW(NULL, L"Roblox"); // Find Roblox window by its title
+    if (hwnd == NULL) {
+        std::cerr << "Roblox window not found." << std::endl;
+        return 1;
+    }
+
+    DWORD pid;
+    GetWindowThreadProcessId(hwnd, &pid); // Get Roblox process ID
+    HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid); // Open process
+
+    if (hProcess == NULL) {
+        std::cerr << "Failed to open Roblox process." << std::endl;
+        return 1;
+    }
+
+    const wchar_t* moduleName = L"RobloxPlayerBeta.exe";
+    uintptr_t moduleBase = GetModuleBaseAddress(pid, moduleName);
+    if (moduleBase == 0) {
+        std::cerr << "Failed to get module base address." << std::endl;
+        CloseHandle(hProcess);
+        return 1;
+    }
+
+    std::cout << "RobloxPlayerBeta.exe base address: 0x" << std::hex << moduleBase << std::endl;
+
+    while (true) {
+        // Find and print strings in memory
+        std::vector<uintptr_t> stringAddresses = FindStrings(hProcess);
+
+        // Dump memory regions
+        uintptr_t addressToDump = moduleBase;
+        size_t sizeToDump = 0x100; // Dump 256 bytes
+        DumpMemory(hProcess, addressToDump, sizeToDump);
+
+        // Sleep for a longer interval before repeating
+        Sleep(30000); // 30 seconds interval
+    }
+
+    CloseHandle(hProcess);
+    return 0;
+}
